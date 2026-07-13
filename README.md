@@ -1,21 +1,21 @@
-# PhoneControl
+# Lian-Li Phone Link (PhoneLink)
 
-PhoneControl is a standalone Windows tray app and LAN web controller for L-Connect LCD devices. It does not edit theme files. It talks to the local L-Connect service and exposes a phone-friendly web UI for:
+Lian-Li Phone Link is a standalone Windows tray app and LAN web controller for L-Connect LCD devices. It does not edit theme files. It communicates with the local L-Connect service and exposes a mobile-friendly web UI for:
 
 - Device selection
 - Installed theme selection with preview
-- Theme apply through L-Connect
-- Brightness command attempts through L-Connect
+- Theme application through L-Connect
+- Brightness control commands through L-Connect
 
-## Run
+## Run / Development
 
-Open `PhoneControl.exe`, or run during development:
+Start the application by launching the built executable, or run it during development:
 
 ```powershell
-dotnet run --project D:\ThemeEditor\PhoneControl
+dotnet run --project d:\PhoneControl
 ```
 
-The settings window opens on startup. Closing or minimizing the window keeps PhoneControl running in the Windows notification area.
+The settings window opens on startup. Closing or minimizing the window keeps PhoneLink running in the Windows notification area (system tray).
 
 Default address:
 
@@ -23,21 +23,21 @@ Default address:
 http://<pc-ip>:37373
 ```
 
-The settings window shows the LAN URL. PIN protection is optional; when enabled, the user chooses the PIN.
+The settings window shows the current LAN URL. PIN protection is optional; when enabled, the user can set a custom PIN.
 
-## Configure
+## Configuration
 
 Edit `appsettings.json` or pass values on the command line:
 
 ```powershell
-dotnet run --project D:\ThemeEditor\PhoneControl --PhoneControl:Port=37373
+dotnet run --project d:\PhoneControl --PhoneControl:Port=37373
 ```
 
-Settings can also be changed in the Windows settings window. Saving restarts the embedded web server when needed.
+Settings can also be modified in the Windows settings window. Saving settings automatically restarts the embedded web server if necessary.
 
 ## Notes
 
 - L-Connect must be running on the PC.
-- Windows Firewall must allow inbound access to the selected PhoneControl port.
-- Theme switching uses `ReloadAssets`, `ApplyTemplate`, `SetTemplate`, `Apply2DTemplate`, `SaveProfile`, and `ApplyScreenContent`.
-- Brightness support depends on the exact L-Connect command accepted by the installed L-Connect version. PhoneControl tries known command variants and reports failure if none are accepted.
+- Windows Firewall must allow inbound access to the selected port.
+- Theme switching uses `ReloadAssets`, `ApplyTemplate`, `SetTemplate`, `Apply2DTemplate`, `SaveProfile`, and `ApplyScreenContent` from the L-Connect service interface.
+- Brightness support depends on the exact command variants accepted by the installed L-Connect version. PhoneLink attempts multiple known command patterns.
