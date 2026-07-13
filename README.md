@@ -7,6 +7,12 @@ Lian-Li Phone Link is a standalone Windows tray app and LAN web controller for L
 - Theme application through L-Connect
 - Brightness control commands through L-Connect
 
+## Supported Devices
+
+- 8.8 Universal Screen
+- Hydroshift 2 S
+- TL Fans
+
 ## Run / Development
 
 Start the application by launching the built executable, or run it during development:
