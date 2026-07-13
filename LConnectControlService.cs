@@ -50,6 +50,8 @@ public sealed class LConnectControlService
 
         var devices = new List<DeviceInfo>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var profileNames = ReadDeviceNamesByModel();
+        var screenBrightness = ReadScreenBrightnessByModel();
 
         try
         {
@@ -70,12 +72,15 @@ public sealed class LConnectControlService
 
                 var selected = await GetSelectedTemplateIdAsync(client, path, cancellationToken);
                 var fallbackName = BuildDeviceName(model, devices.Count(d => string.Equals(d.Model, model, StringComparison.OrdinalIgnoreCase)) + 1);
+                var profileName = TryDequeueDeviceName(profileNames, model);
+                var brightness = TryDequeueScreenBrightness(screenBrightness, model);
                 devices.Add(new DeviceInfo(
                     EncodingHelper.ToBase64Url(path),
-                    BuildUniqueDeviceName(FirstNonEmpty(controller.Name, fallbackName), devices),
+                    BuildUniqueDeviceName(FirstNonEmpty(controller.Name, profileName, fallbackName), devices),
                     model,
                     path,
-                    selected));
+                    selected,
+                    brightness));
             }
         }
         catch
@@ -107,7 +112,15 @@ public sealed class LConnectControlService
         using var client = CreateClient(TimeSpan.FromSeconds(3));
         var selected = await GetSelectedTemplateIdAsync(client, path, cancellationToken);
         var name = await GetControllerNameAsync(client, path, cancellationToken);
-        return new DeviceInfo(deviceId, FirstNonEmpty(name, BuildDeviceName(model, 1)), model, path, selected);
+        var profileNames = ReadDeviceNamesByModel();
+        var screenBrightness = ReadScreenBrightnessByModel();
+        return new DeviceInfo(
+            deviceId,
+            FirstNonEmpty(name, TryDequeueDeviceName(profileNames, model), BuildDeviceName(model, 1)),
+            model,
+            path,
+            selected,
+            TryDequeueScreenBrightness(screenBrightness, model));
     }
 
     public IReadOnlyList<WirelessFanGroupInfo> GetWirelessFanGroups()
@@ -145,8 +158,9 @@ public sealed class LConnectControlService
                 var group = GetJsonInt(item, "LcdGroup");
                 var sortIndex = GetJsonInt(item, "SortIndex");
                 var savedName = FirstNonEmpty(
-                    GetJsonString(item, "GroupName"),
-                    profileNames.TryGetValue(mac, out var profileName) ? profileName : "");
+                    profileNames.TryGetValue(mac, out var profileName) ? profileName : "",
+                    GetJsonString(item, "Name"),
+                    GetJsonString(item, "GroupName"));
                 var ledCount = GetJsonInt(item, "LedNum");
                 var recType = ReadFirstInt(item, "RecType");
                 var typeName = recType switch
@@ -1127,10 +1141,19 @@ public sealed class LConnectControlService
     private static Dictionary<string, string> ReadWirelessFanGroupNames()
     {
         var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        void Add(string? mac, string? name)
+        {
+            if (!string.IsNullOrWhiteSpace(mac) && IsUsableDeviceName(name ?? ""))
+            {
+                names[mac.Trim()] = name!.Trim();
+            }
+        }
+
         foreach (var file in EnumerateProfileFiles())
         {
             if (!TryReadGZipText(file, out var json) ||
-                !json.Contains("\"SubProfiles\"", StringComparison.OrdinalIgnoreCase))
+                (!json.Contains("\"SubProfiles\"", StringComparison.OrdinalIgnoreCase) &&
+                 !json.Contains("\"DeviceList\"", StringComparison.OrdinalIgnoreCase)))
             {
                 continue;
             }
@@ -1146,11 +1169,102 @@ public sealed class LConnectControlService
 
                 foreach (var profile in profiles.OfType<JsonObject>())
                 {
-                    var mac = profile["MacStr"]?.GetValue<string>();
-                    var name = profile["GroupName"]?.GetValue<string>();
-                    if (!string.IsNullOrWhiteSpace(mac) && !string.IsNullOrWhiteSpace(name))
+                    Add(profile["MacStr"]?.GetValue<string>(), profile["GroupName"]?.GetValue<string>());
+                }
+
+                foreach (var device in root?["DeviceList"]?.AsArray().OfType<JsonObject>() ?? Enumerable.Empty<JsonObject>())
+                {
+                    Add(device["MacStr"]?.GetValue<string>(), device["Name"]?.GetValue<string>());
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        AddWirelessFanNamesFromDeviceSettings(names);
+        return names;
+    }
+
+    private static void AddWirelessFanNamesFromDeviceSettings(Dictionary<string, string> names)
+    {
+        var file = GetLConnectDeviceSettingFile("LWireless-UnBindDevice-Setting", "Fan");
+        if (!File.Exists(file) || !TryReadGZipText(file, out var json))
+        {
+            return;
+        }
+
+        try
+        {
+            var data = ParseLConnectJson(json)?["Data"]?.AsObject();
+            if (data is null)
+            {
+                return;
+            }
+
+            foreach (var item in data)
+            {
+                var name = item.Value?["Name"]?.GetValue<string>();
+                if (IsUsableDeviceName(name ?? ""))
+                {
+                    names[item.Key] = name!.Trim();
+                }
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private static Dictionary<string, Queue<string>> ReadDeviceNamesByModel()
+    {
+        var names = new Dictionary<string, Queue<string>>(StringComparer.OrdinalIgnoreCase);
+        void Add(string model, string name)
+        {
+            if (string.IsNullOrWhiteSpace(model) || !IsUsableDeviceName(name))
+            {
+                return;
+            }
+
+            if (!names.TryGetValue(model, out var queue))
+            {
+                queue = new Queue<string>();
+                names[model] = queue;
+            }
+
+            if (!queue.Contains(name, StringComparer.OrdinalIgnoreCase))
+            {
+                queue.Enqueue(name.Trim());
+            }
+        }
+
+        foreach (var file in EnumerateProfileFiles())
+        {
+            if (!TryReadGZipText(file, out var json))
+            {
+                continue;
+            }
+
+            try
+            {
+                var root = ParseLConnectJson(json)?.AsObject();
+                if (root is null)
+                {
+                    continue;
+                }
+
+                if (LooksLikeUniversalScreenProfile(root))
+                {
+                    Add(UniversalScreenDeviceModel, root["Name"]?.GetValue<string>() ?? "");
+                }
+
+                foreach (var device in root["DeviceList"]?.AsArray().OfType<JsonObject>() ?? Enumerable.Empty<JsonObject>())
+                {
+                    var productType = ReadNodeInt(device["ProductType"]) ?? 0;
+                    var mac = device["MacStr"]?.GetValue<string>() ?? "";
+                    if (productType == 5 || string.Equals(mac, WirelessMergeTarget.HydroShift.PortOrderList[0], StringComparison.OrdinalIgnoreCase))
                     {
-                        names[mac] = name.Trim();
+                        Add("hydroshift-ii-lcd-s", device["Name"]?.GetValue<string>() ?? "");
                     }
                 }
             }
@@ -1159,7 +1273,173 @@ public sealed class LConnectControlService
             }
         }
 
+        AddHydroShiftNamesFromDeviceSettings(names);
         return names;
+    }
+
+    private static bool LooksLikeUniversalScreenProfile(JsonObject root) =>
+        root.ContainsKey("Name") &&
+        (root.ContainsKey("PortraitTemplateConfig") ||
+         root.ContainsKey("LandscapeTemplateConfig")) &&
+        (root.ContainsKey("LightingSettings") ||
+         root.ContainsKey("LightingMode") ||
+         root.ContainsKey("Brightness"));
+
+    private static void AddHydroShiftNamesFromDeviceSettings(Dictionary<string, Queue<string>> names)
+    {
+        var file = GetLConnectDeviceSettingFile("LWireless-UnBindDevice-Setting", "Pump");
+        if (!File.Exists(file) || !TryReadGZipText(file, out var json))
+        {
+            return;
+        }
+
+        try
+        {
+            var data = ParseLConnectJson(json)?["Data"]?.AsObject();
+            var hydro = data?[WirelessMergeTarget.HydroShift.PortOrderList[0]]?.AsObject();
+            var name = hydro?["Name"]?.GetValue<string>() ?? "";
+            if (!IsUsableDeviceName(name))
+            {
+                return;
+            }
+
+            var model = "hydroshift-ii-lcd-s";
+            if (!names.TryGetValue(model, out var queue))
+            {
+                queue = new Queue<string>();
+                names[model] = queue;
+            }
+
+            if (queue.Contains(name, StringComparer.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            names[model] = new Queue<string>(new[] { name.Trim() }.Concat(queue));
+        }
+        catch
+        {
+        }
+    }
+
+    private static string TryDequeueDeviceName(Dictionary<string, Queue<string>> names, string model)
+    {
+        if (names.TryGetValue(model, out var queue) && queue.Count > 0)
+        {
+            return queue.Dequeue();
+        }
+
+        return "";
+    }
+
+    private static Dictionary<string, Queue<int>> ReadScreenBrightnessByModel()
+    {
+        var values = new Dictionary<string, Queue<int>>(StringComparer.OrdinalIgnoreCase);
+        void Add(string model, int? value)
+        {
+            if (string.IsNullOrWhiteSpace(model) || !value.HasValue)
+            {
+                return;
+            }
+
+            if (!values.TryGetValue(model, out var queue))
+            {
+                queue = new Queue<int>();
+                values[model] = queue;
+            }
+
+            queue.Enqueue(Math.Clamp(value.Value, 0, 100));
+        }
+
+        foreach (var file in EnumerateProfileFiles())
+        {
+            if (!TryReadGZipText(file, out var json))
+            {
+                continue;
+            }
+
+            try
+            {
+                var root = ParseLConnectJson(json)?.AsObject();
+                if (root is null)
+                {
+                    continue;
+                }
+
+                if (LooksLikeUniversalScreenProfile(root))
+                {
+                    Add(UniversalScreenDeviceModel, ReadNodeInt(root["Brightness"]));
+                }
+
+                if (root.ContainsKey("ScreenBrightness") &&
+                    (root.ContainsKey("Fan") || root.ContainsKey("Pump") || root.ContainsKey("CurrentH2EffectsScope")))
+                {
+                    Add("hydroshift-ii-lcd-s", ReadNodeInt(root["ScreenBrightness"]));
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        AddHydroShiftScreenBrightnessFromDeviceSettings(values);
+        return values;
+    }
+
+    private static void AddHydroShiftScreenBrightnessFromDeviceSettings(Dictionary<string, Queue<int>> values)
+    {
+        var candidates = new[]
+        {
+            GetLConnectDeviceSettingFile("LWireless-Controller", "Pump"),
+            GetLConnectDeviceSettingFile("LWireless-UnBindDevice-Setting", "Pump")
+        };
+
+        foreach (var file in candidates)
+        {
+            if (!File.Exists(file) || !TryReadGZipText(file, out var json))
+            {
+                continue;
+            }
+
+            try
+            {
+                var data = ParseLConnectJson(json)?["Data"]?.AsObject();
+                var hydro = data?[WirelessMergeTarget.HydroShift.PortOrderList[0]]?.AsObject();
+                var value =
+                    ReadNodeInt(hydro?["AioParams"]?["LcdBrightness"]) ??
+                    ReadNodeInt(hydro?["LcdBrightness"]) ??
+                    ReadNodeInt(hydro?["LCDBrightness"]) ??
+                    ReadNodeInt(hydro?["ScreenBrightness"]) ??
+                    ReadNodeInt(hydro?["Brightness"]);
+
+                if (!value.HasValue)
+                {
+                    continue;
+                }
+
+                var model = "hydroshift-ii-lcd-s";
+                if (!values.TryGetValue(model, out var queue))
+                {
+                    queue = new Queue<int>();
+                }
+
+                values[model] = new Queue<int>(new[] { Math.Clamp(value.Value, 0, 100) }.Concat(queue));
+                return;
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private static int? TryDequeueScreenBrightness(Dictionary<string, Queue<int>> values, string model)
+    {
+        if (values.TryGetValue(model, out var queue) && queue.Count > 0)
+        {
+            return queue.Dequeue();
+        }
+
+        return null;
     }
 
     private static bool TryReadGZipText(string file, out string text)

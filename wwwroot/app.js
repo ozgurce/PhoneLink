@@ -322,6 +322,9 @@ async function handleTargetChanged() {
   els.fanMergeCheck.checked = state.fanMerge;
   els.screenCard.classList.toggle("hidden", isFanTarget);
   els.themesSection.classList.toggle("hidden", isFanTarget);
+  if (!isFanTarget) {
+    applyDeviceBrightness(selectedDevice());
+  }
 
   if (isFanTarget) {
     if (!state.fanGroups.length) {
@@ -338,6 +341,13 @@ async function handleTargetChanged() {
 
   await loadEffects();
   await loadThemes();
+}
+
+function applyDeviceBrightness(device) {
+  const value = Number(device?.screenBrightness ?? 50);
+  const brightness = Number.isFinite(value) ? snapBrightness(value) : 50;
+  els.brightnessSlider.value = String(brightness);
+  updateBrightnessUi(brightness);
 }
 
 async function loadThemes() {

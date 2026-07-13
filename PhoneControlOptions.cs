@@ -26,7 +26,8 @@ public sealed record DeviceInfo(
     string Name,
     string Model,
     string Path,
-    string SelectedTemplateId);
+    string SelectedTemplateId,
+    int? ScreenBrightness = null);
 
 public sealed record ThemeInfo(
     string Id,
