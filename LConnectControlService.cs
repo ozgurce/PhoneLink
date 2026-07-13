@@ -54,8 +54,9 @@ public sealed class LConnectControlService
         try
         {
             using var doc = JsonDocument.Parse(result.Body);
-            foreach (var path in EnumerateControllerPaths(doc.RootElement))
+            foreach (var controller in EnumerateControllers(doc.RootElement))
             {
+                var path = controller.Path;
                 if (string.IsNullOrWhiteSpace(path) || !seen.Add(NormalizeControllerPathForCompare(path)))
                 {
                     continue;
@@ -68,9 +69,10 @@ public sealed class LConnectControlService
                 }
 
                 var selected = await GetSelectedTemplateIdAsync(client, path, cancellationToken);
+                var fallbackName = BuildDeviceName(model, devices.Count(d => string.Equals(d.Model, model, StringComparison.OrdinalIgnoreCase)) + 1);
                 devices.Add(new DeviceInfo(
                     EncodingHelper.ToBase64Url(path),
-                    BuildDeviceName(model, devices.Count(d => string.Equals(d.Model, model, StringComparison.OrdinalIgnoreCase)) + 1),
+                    BuildUniqueDeviceName(FirstNonEmpty(controller.Name, fallbackName), devices),
                     model,
                     path,
                     selected));
@@ -104,7 +106,8 @@ public sealed class LConnectControlService
 
         using var client = CreateClient(TimeSpan.FromSeconds(3));
         var selected = await GetSelectedTemplateIdAsync(client, path, cancellationToken);
-        return new DeviceInfo(deviceId, BuildDeviceName(model, 1), model, path, selected);
+        var name = await GetControllerNameAsync(client, path, cancellationToken);
+        return new DeviceInfo(deviceId, FirstNonEmpty(name, BuildDeviceName(model, 1)), model, path, selected);
     }
 
     public IReadOnlyList<WirelessFanGroupInfo> GetWirelessFanGroups()
@@ -856,8 +859,32 @@ public sealed class LConnectControlService
         try
         {
             using var doc = JsonDocument.Parse(result.Body);
-            return EnumerateControllerPaths(doc.RootElement)
+            return EnumerateControllers(doc.RootElement)
+                .Select(controller => controller.Path)
                 .FirstOrDefault(IsWirelessTransmitterControllerPath) ?? "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    private async Task<string> GetControllerNameAsync(HttpClient client, string devicePath, CancellationToken cancellationToken)
+    {
+        var result = await lConnectClient.SendServiceRequestForJsonAsync(client, "SyncControllerList", "{}", cancellationToken);
+        if (!result.IsHttpSuccess || string.IsNullOrWhiteSpace(result.Body))
+        {
+            return "";
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(result.Body);
+            var normalizedPath = NormalizeControllerPathForCompare(devicePath);
+            return EnumerateControllers(doc.RootElement)
+                .Where(controller => string.Equals(NormalizeControllerPathForCompare(controller.Path), normalizedPath, StringComparison.OrdinalIgnoreCase))
+                .Select(controller => controller.Name)
+                .FirstOrDefault(name => !string.IsNullOrWhiteSpace(name)) ?? "";
         }
         catch
         {
@@ -2188,6 +2215,8 @@ public sealed class LConnectControlService
                 groups.Select(_ => Math.Clamp(direction, 0, 1)).ToArray());
     }
 
+    private sealed record ControllerDiscoveryInfo(string Path, string Name);
+
     private static List<ThemeInfo> ParseThemes(string json, string deviceId, string selectedId)
     {
         var result = new List<ThemeInfo>();
@@ -2272,18 +2301,24 @@ public sealed class LConnectControlService
             .ToArray();
     }
 
-    private static IEnumerable<string> EnumerateControllerPaths(JsonElement element)
+    private static IEnumerable<ControllerDiscoveryInfo> EnumerateControllers(JsonElement element) =>
+        EnumerateControllers(element, "");
+
+    private static IEnumerable<ControllerDiscoveryInfo> EnumerateControllers(JsonElement element, string inheritedName)
     {
         if (element.ValueKind == JsonValueKind.Object)
         {
+            var objectName = FirstNonEmpty(ReadControllerName(element), inheritedName);
             foreach (var property in element.EnumerateObject())
             {
                 if (LooksLikeControllerPath(property.Name))
                 {
-                    yield return property.Name;
+                    yield return new ControllerDiscoveryInfo(
+                        property.Name,
+                        FirstNonEmpty(ReadControllerName(property.Value), objectName));
                 }
 
-                foreach (var nested in EnumerateControllerPaths(property.Value))
+                foreach (var nested in EnumerateControllers(property.Value, objectName))
                 {
                     yield return nested;
                 }
@@ -2293,7 +2328,7 @@ public sealed class LConnectControlService
         {
             foreach (var item in element.EnumerateArray())
             {
-                foreach (var nested in EnumerateControllerPaths(item))
+                foreach (var nested in EnumerateControllers(item, inheritedName))
                 {
                     yield return nested;
                 }
@@ -2304,10 +2339,71 @@ public sealed class LConnectControlService
             var value = element.GetString() ?? "";
             if (LooksLikeControllerPath(value))
             {
-                yield return value;
+                yield return new ControllerDiscoveryInfo(value, inheritedName);
             }
         }
     }
+
+    private static string ReadControllerName(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return "";
+        }
+
+        foreach (var name in new[]
+        {
+            "DeviceName",
+            "DisplayName",
+            "NickName",
+            "Nickname",
+            "Alias",
+            "ProductName",
+            "ModelName",
+            "Name",
+            "Title"
+        })
+        {
+            var value = GetJsonStringIgnoreCase(element, name);
+            if (IsUsableDeviceName(value))
+            {
+                return value.Trim();
+            }
+        }
+
+        return "";
+    }
+
+    private static string GetJsonStringIgnoreCase(JsonElement element, string name)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return "";
+        }
+
+        foreach (var property in element.EnumerateObject())
+        {
+            if (!property.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            return property.Value.ValueKind switch
+            {
+                JsonValueKind.String => property.Value.GetString() ?? "",
+                JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False => property.Value.ToString(),
+                _ => ""
+            };
+        }
+
+        return "";
+    }
+
+    private static bool IsUsableDeviceName(string value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        !LooksLikeControllerPath(value) &&
+        !value.Contains("vid_", StringComparison.OrdinalIgnoreCase) &&
+        !value.Contains("pid_", StringComparison.OrdinalIgnoreCase);
 
     private static bool LooksLikeControllerPath(string value) =>
         value.Contains("vid_", StringComparison.OrdinalIgnoreCase) ||
@@ -2356,6 +2452,25 @@ public sealed class LConnectControlService
 
     private static string NormalizeControllerPathForCompare(string path) =>
         (path ?? string.Empty).Replace("\\\\", "\\").Trim();
+
+    private static string BuildUniqueDeviceName(string requestedName, IReadOnlyList<DeviceInfo> existingDevices)
+    {
+        var name = string.IsNullOrWhiteSpace(requestedName) ? "LCD Device" : requestedName.Trim();
+        if (!existingDevices.Any(device => string.Equals(device.Name, name, StringComparison.OrdinalIgnoreCase)))
+        {
+            return name;
+        }
+
+        var index = 2;
+        string candidate;
+        do
+        {
+            candidate = $"{name} #{index++}";
+        }
+        while (existingDevices.Any(device => string.Equals(device.Name, candidate, StringComparison.OrdinalIgnoreCase)));
+
+        return candidate;
+    }
 
     private static string BuildDeviceName(string model, int instance) => model switch
     {
