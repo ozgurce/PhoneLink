@@ -618,7 +618,7 @@ public sealed class LConnectControlService
     {
         foreach (var body in BuildLightingEffectBodies(effect, brightness, color, colors, speed, direction))
         {
-            foreach (var command in new[] { "SetLightingEffectSetting", "SetLightingSetting", "SetScreenLightingEffectSetting", "SetScreenBrightness" })
+            foreach (var command in new[] { "SetLightingEffectSetting", "SetLightingSetting", "SetScreenLightingEffectSetting" })
             {
                 tried.Add(command);
                 if (await SendDeviceCommandAsync(client, devicePath, command, body, cancellationToken, acceptEmptyResponse: command is "SetLightingEffectSetting"))
@@ -1553,10 +1553,39 @@ public sealed class LConnectControlService
 
     private static IReadOnlyList<string> BuildLightingEffectBodies(string effect, int brightness, string color, string[]? requestedColors, int speed, int direction)
     {
-        var name = ToEffectDisplayName(effect);
+        var name = ToEffectDisplayName(effect, UniversalScreenDeviceModel);
         var mode = ToUniversalLightingMode(effect);
-        var colors = BuildEffectColors(effect, color, requestedColors, 6, fillRequestedColors: true);
+        var effectDefinition = EffectsForTarget(UniversalScreenDeviceModel).FirstOrDefault(item => item.Id == effect);
+        var colorCount = effectDefinition is null ? 6 : ColorCountForTarget(effectDefinition, UniversalScreenDeviceModel);
+        var colors = BuildEffectColors(effect, color, requestedColors, Math.Clamp(colorCount, 0, 6), fillRequestedColors: true);
         var universalSpeed = ToUniversalSpeed(speed);
+        var universalSetting = new
+        {
+            Colors = colors,
+            Brightness = brightness,
+            Speed = universalSpeed,
+            IsReverseDirection = direction != 0,
+            type = "LConnectCore.Products.UniversalScreen8p8Inch.UniversalScreen8p8InchLightingSetting, L-Connect.Core"
+        };
+        var universalRequest = new
+        {
+            IgnoreApply = false,
+            Mode = mode,
+            Setting = universalSetting,
+            type = "LConnectCore.Products.UniversalScreen8p8Inch.Requests.UniversalScreen8p8InchSetLightingEffectSettingRequest, L-Connect.Core"
+        };
+        var universalRequestWithoutType = new
+        {
+            IgnoreApply = false,
+            Mode = mode,
+            Setting = new
+            {
+                Colors = colors,
+                Brightness = brightness,
+                Speed = universalSpeed,
+                IsReverseDirection = direction != 0
+            }
+        };
         var body = new
         {
             Name = name,
@@ -1569,25 +1598,14 @@ public sealed class LConnectControlService
             IsReverseDirection = direction != 0,
             type = "UniversalScreen8p8InchLightingSetting"
         };
-        var universalRequest = new
-        {
-            IgnoreApply = false,
-            Mode = mode,
-            Setting = new
-            {
-                Colors = colors,
-                Brightness = brightness,
-                Speed = universalSpeed,
-                IsReverseDirection = direction != 0,
-                type = "UniversalScreen8p8InchLightingSetting"
-            }
-        };
 
         return new[]
         {
-            JsonSerializer.Serialize(body).Replace("\"type\"", "\"$type\""),
             JsonSerializer.Serialize(universalRequest).Replace("\"type\"", "\"$type\""),
-            JsonSerializer.Serialize(name),
+            JsonSerializer.Serialize(universalRequestWithoutType),
+            JsonSerializer.Serialize(body).Replace("\"type\"", "\"$type\""),
+            JsonSerializer.Serialize(mode),
+            JsonSerializer.Serialize(new { Mode = mode, Brightness = brightness }),
             JsonSerializer.Serialize(new { Effect = name, Brightness = brightness }),
             JsonSerializer.Serialize(new { LightingEffect = name, Brightness = brightness })
         };
@@ -2412,8 +2430,12 @@ public sealed class LConnectControlService
         return palette[Math.Abs(StringComparer.OrdinalIgnoreCase.GetHashCode(id)) % palette.Length];
     }
 
-    private static string ToEffectDisplayName(string effect) =>
-        LConnectEffects.FirstOrDefault(item => item.Id == effect)?.Name ?? "Meteor";
+    private static string ToEffectDisplayName(string effect, string targetModel = "") =>
+        (!string.IsNullOrWhiteSpace(targetModel)
+            ? EffectsForTarget(targetModel).FirstOrDefault(item => item.Id == effect)?.Name
+            : null) ??
+        LConnectEffects.FirstOrDefault(item => item.Id == effect)?.Name ??
+        "Meteor";
 
     private static int ToUniversalLightingMode(string effect) =>
         EffectsForTarget(UniversalScreenDeviceModel).FirstOrDefault(item => item.Id == effect)?.UniversalMode ??
