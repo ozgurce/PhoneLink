@@ -616,7 +616,13 @@ public sealed class LConnectControlService
         List<string> tried,
         CancellationToken cancellationToken)
     {
-        foreach (var body in BuildLightingEffectBodies(effect, brightness, color, colors, speed, direction))
+        var mode = ToUniversalLightingMode(effect);
+        var colorCounts = await GetUniversalScreenLightingColorCountsAsync(devicePath, cancellationToken);
+        var colorCount = colorCounts.TryGetValue(mode, out var count)
+            ? count
+            : (int?)null;
+
+        foreach (var body in BuildLightingEffectBodies(effect, brightness, color, colors, speed, direction, colorCount))
         {
             foreach (var command in new[] { "SetLightingEffectSetting", "SetLightingSetting", "SetScreenLightingEffectSetting" })
             {
@@ -1551,13 +1557,15 @@ public sealed class LConnectControlService
         return JsonSerializer.Serialize(body).Replace("\"type\"", "\"$type\"");
     }
 
-    private static IReadOnlyList<string> BuildLightingEffectBodies(string effect, int brightness, string color, string[]? requestedColors, int speed, int direction)
+    private static IReadOnlyList<string> BuildLightingEffectBodies(string effect, int brightness, string color, string[]? requestedColors, int speed, int direction, int? colorCountOverride = null)
     {
         var name = ToEffectDisplayName(effect, UniversalScreenDeviceModel);
         var mode = ToUniversalLightingMode(effect);
         var effectDefinition = EffectsForTarget(UniversalScreenDeviceModel).FirstOrDefault(item => item.Id == effect);
-        var colorCount = effectDefinition is null ? 6 : ColorCountForTarget(effectDefinition, UniversalScreenDeviceModel);
-        var colors = BuildEffectColors(effect, color, requestedColors, Math.Clamp(colorCount, 0, 6), fillRequestedColors: true);
+        var colorCount = colorCountOverride ?? (effectDefinition is null ? 6 : ColorCountForTarget(effectDefinition, UniversalScreenDeviceModel));
+        object? colors = colorCount <= 0
+            ? null
+            : BuildEffectColors(effect, color, requestedColors, Math.Clamp(colorCount, 0, 6), fillRequestedColors: true);
         var universalSpeed = ToUniversalSpeed(speed);
         var universalSetting = new
         {
@@ -2261,7 +2269,8 @@ public sealed class LConnectControlService
                 "static" or "breathing" => 1,
                 "runway" or "mixing" or "river" => 2,
                 "hourglass" or "electric-current" => 4,
-                _ => effect.ColorCount
+                "wave" or "paint" or "tide" or "blow-up" or "meteor" or "snooker" or "ping-pong" => 6,
+                _ => Math.Min(effect.ColorCount, 6)
             };
         }
 
